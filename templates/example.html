@@ -1,0 +1,192 @@
+<html><head><base href="." /><title>OpenStreetMap Grid System</title>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <style>
+    #map {
+      height: 100vh;
+      width: 100%;
+    }
+    .grid-label {
+      background: rgba(255, 255, 255, 0.8);
+      border: none;
+      padding: 2px 6px;
+      font-size: 12px;
+      border-radius: 3px;
+    }
+    .grid-info-popup {
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script>
+    // Конфигурация сетки
+    const CONFIG = {
+      baseUrl: 'http://127.0.0.1:8000/coordinates/', // Замените на ваш URL бэкенда
+    };
+
+    // Инициализация карты
+    const map = L.map('map').setView([55.75, 37.62], 12); // Москва как центр, увеличен zoom для лучшей видимости сетки
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: ' OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Класс для управления сеткой
+    class GridSystem {
+      constructor(map, config) {
+        this.map = map;
+        this.config = config;
+        this.gridLayer = L.layerGroup().addTo(map);
+        this.cells = new Map();
+        
+        this.map.on('moveend zoomend', () => this.updateGrid());
+      }
+
+      // Получение размера сетки в зависимости от зума
+      getGridSize() {
+        const zoom = this.map.getZoom();
+        // Пересчитываем размер сетки в градусы (примерно)
+        // 5 км примерно равно 0.045 градусам
+        if (zoom <= 10) return 0.045 * 2; // 10км
+        if (zoom <= 12) return 0.045; // 5км
+        if (zoom <= 14) return 0.045 / 2; // 2.5км
+        if (zoom <= 16) return 0.045 / 4; // 1.25км
+        return 0.045 / 8; // 0.625км
+      }
+
+      createGrid() {
+        const bounds = this.map.getBounds();
+        const gridSize = this.getGridSize();
+        const north = Math.ceil(bounds.getNorth() / gridSize) * gridSize;
+        const south = Math.floor(bounds.getSouth() / gridSize) * gridSize;
+        const east = Math.ceil(bounds.getEast() / gridSize) * gridSize;
+        const west = Math.floor(bounds.getWest() / gridSize) * gridSize;
+
+        for (let lat = south; lat <= north; lat += gridSize) {
+          for (let lng = west; lng <= east; lng += gridSize) {
+            this.createCell(lat, lng, gridSize);
+          }
+        }
+      }
+
+      async createCell(lat, lng, gridSize) {
+        const cellKey = `${lat},${lng}`;
+        if (this.cells.has(cellKey)) return;
+
+        const response = await fetch(this.config.baseUrl, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({'lat': lat, 'lon': lng})
+        });
+
+        const content = await response.json()
+
+        const bounds = [
+          [lat, lng],
+          [lat + gridSize, lng + gridSize]
+        ];
+
+        const rectangle = L.rectangle(bounds, {
+          color: '#000',
+          weight: 1,
+          fillOpacity: 0.1
+        }).addTo(this.gridLayer);
+
+        const center = rectangle.getBounds().getCenter();
+        const label = L.divIcon({
+          className: 'grid-label',
+          html: `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        });
+
+        const marker = L.marker(center, { icon: label }).addTo(this.gridLayer);
+
+        this.cells.set(cellKey, {
+          rectangle,
+          marker,
+          data: null
+        });
+
+        rectangle.on('click', () => this.handleCellClick(cellKey));
+        this.loadCellData(cellKey, lat, lng, content.id);
+      }
+
+      async handleCellClick(cellKey) {
+        const cell = this.cells.get(cellKey);
+        if (!cell) return;
+        
+        const [lat, lng] = cellKey.split(',').map(Number);
+        const popup = L.popup()
+          .setLatLng(cell.rectangle.getBounds().getCenter())
+          .setContent(this.createPopupContent(cell.data || { loading: true }))
+          .openOn(this.map);
+      }
+
+      createPopupContent(data) {
+        if (data.loading) {
+          return '<div class="grid-info-popup">Loading data...</div>';
+        }
+        
+        return `
+          <div class="grid-info-popup">
+            <h3>Cell Information</h3>
+            <p>Latitude: ${data.coordinates.lat}</p>
+            <p>Longtitude: ${data.coordinates.lon}</p>
+          </div>
+        `;
+      }
+
+      async loadCellData(cellKey, lat, lng, id) {
+        try {
+          const response = await this.fetchCellData(id);
+          const cell = this.cells.get(cellKey);
+          if (cell) {
+            cell.data = response;
+            this.updateCellStyle(cell, response);
+          }
+        } catch (error) {
+          console.error(`Error loading data for cell ${cellKey}:`, error);
+        }
+      }
+
+      async fetchCellData(id) {
+        // Временная заглушка для демонстрации
+        const response = await fetch(this.config.baseUrl + id)
+        const json = await response.json()
+        return new Promise(resolve => setTimeout(() => resolve({
+          coordinates: json
+        }), 500));
+      }
+
+      updateCellStyle(cell, data) {
+        if (data.temperature) {
+          const color = this.getTemperatureColor(data.temperature);
+          cell.rectangle.setStyle({ fillColor: color, fillOpacity: 0.3 });
+        }
+      }
+
+      getTemperatureColor(temperature) {
+        if (temperature < 0) return '#0000FF';
+        if (temperature < 15) return '#00FF00';
+        if (temperature < 25) return '#FFFF00';
+        return '#FF0000';
+      }
+
+      updateGrid() {
+        this.gridLayer.clearLayers();
+        this.cells.clear();
+        this.createGrid();
+      }
+    }
+
+    // Создание экземпляра системы сетки
+    const gridSystem = new GridSystem(map, CONFIG);
+    gridSystem.createGrid();
+  </script>
+</body></html>
